@@ -18,7 +18,7 @@ pub enum PointData {
 impl PointData {
     fn resolve(&self, drawables: &Vec<Drawable>) -> (f64, f64) {
         match self {
-            PointData::Xy(PointXYData { x, y }) => (x(), y()),
+             PointData::Xy(PointXYData { x, y }) => (x(), y()),
             PointData::Ref(r) => {
                 match r.get() {
                     None => (0.0, 0.0),
@@ -78,8 +78,8 @@ impl IntoAttribute for StepOption {
 pub fn options_for(cx: Scope, id: usize) -> Vec<StepOption> {
     let mut opts = Vec::new();
 
+    let drawables = use_context::<Signal<Vec<Drawable>>>(cx).unwrap();
     let steps = use_context::<ReadSignal<Vec<Step>>>(cx).unwrap().get();
-    let drawables = use_context::<Signal<Vec<Drawable>>>(cx).unwrap().get();
 
     let mut step_ids = Vec::new();
     for step in steps.iter() {
@@ -91,7 +91,7 @@ pub fn options_for(cx: Scope, id: usize) -> Vec<StepOption> {
         }
     }
 
-    for drawable in drawables.iter() {
+    for drawable in drawables.get().iter() {
         if step_ids.contains(&drawable.step_id) {
             for sp_id in 0..drawable.drawable.snap_points().len() {
                 opts.push(StepOption {
