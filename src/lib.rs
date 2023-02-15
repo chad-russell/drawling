@@ -16,25 +16,33 @@ pub enum PointData {
 }
 
 impl PointData {
-    fn resolve(&self, cx: Scope, drawables: &Vec<Drawable>) -> (f64, f64) {
+    fn resolve(&self, drawables: &Vec<Drawable>) -> (f64, f64) {
         match self {
             PointData::Xy(PointXYData { x, y }) => (x(), y()),
             PointData::Ref(r) => {
                 match r.get() {
                     None => (0.0, 0.0),
                     Some(r) => {
-                        let steps = use_context::<ReadSignal<Vec<Step>>>(cx).unwrap().get();
-                        let found = steps.iter().filter(|s| s.id == r.id).next();
+                        // let steps = use_context::<ReadSignal<Vec<Step>>>(cx).unwrap().get();
+                        // let found = steps.iter().filter(|s| s.id == r.id).next();
+                        // match found {
+                        //     None => (0.0, 0.0),
+                        //     Some(step) => {
+                        //         let drawable = drawables.iter().find(|d| d.id == step.id).unwrap();
+                        //         let sp = drawable.drawable.snap_points()[r.snap_point];
+                        //         (sp.x, sp.y)
+                        //     }
+                        // }
+
+                        let found = drawables.iter().filter(|s| s.step_id == r.step_id).next();
                         match found {
-                            None => (0.0, 0.0),
-                            Some(step) => match step.step {
-                                StepData::DrawPoint(p) => p.get().resolve(cx, drawables),
-                                StepData::DrawLine(_, _) => {
-                                    let drawable = drawables.iter().find(|d| d.id == step.id).unwrap();
-                                    let sp = drawable.drawable.snap_points()[r.snap_point];
-                                    (sp.x, sp.y)
+                            Some(drawable) => {
+                                match drawable.drawable.snap_points().get(r.snap_point) {
+                                    Some(point) => (point.x, point.y),
+                                    _ => (0.0, 0.0)
                                 }
-                            }
+                            },
+                            _ => (0.0, 0.0),
                         }
                     }
                 }
@@ -67,7 +75,7 @@ pub struct Step {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepOption {
-    id: usize,
+    step_id: usize,
     snap_point: usize,
     name: String
 }
@@ -95,12 +103,12 @@ pub fn options_for(cx: Scope, id: usize) -> Vec<StepOption> {
     }
 
     for drawable in drawables.get().iter() {
-        if step_ids.contains(&drawable.id) {
+        if step_ids.contains(&drawable.step_id) {
             for sp_id in 0..drawable.drawable.snap_points().len() {
                 opts.push(StepOption {
-                    id: drawable.id,
+                    step_id: drawable.step_id,
                     snap_point: sp_id,
-                    name: format!("{} #{}, SP #{}", steps.iter().find(|s| s.id == drawable.id).unwrap().step.describe(), drawable.id, sp_id),
+                    name: format!("{} #{}, SP #{}", steps.iter().find(|s| s.id == drawable.step_id).unwrap().step.describe(), drawable.step_id, sp_id),
                 });
             }
         }
@@ -129,7 +137,7 @@ pub fn PointC(cx: Scope, point: RwSignal<PointData>, step_id: usize) -> impl Int
             }>
                 <For 
                     each=move || options_for(cx, step_id) 
-                    key=|o| o.id
+                    key=|o| o.step_id
                     view=move |o| {
                         let o_name = o.name.clone();
                         view!{cx, <option value={o}>{o_name}</option> }
@@ -266,7 +274,7 @@ enum DrawableData {
 
 #[derive(Debug, Copy, Clone)]
 pub struct Drawable {
-    id: usize,
+    step_id: usize,
     drawable: DrawableData,
 }
 
@@ -286,21 +294,21 @@ impl DrawableData {
     }
 }
 
-fn execute(cx: Scope, steps: ReadSignal<Vec<Step>>) -> Vec<Drawable> {
+fn execute(steps: ReadSignal<Vec<Step>>) -> Vec<Drawable> {
     let mut drawables = Vec::new();
 
     for step in steps().iter() {
         match step.step {
             StepData::DrawPoint(xy) => {
-                let (x, y) = xy().resolve(cx, &drawables);
-                drawables.push(Drawable { id: step.id, drawable: DrawableData::Point(PointDrawable { x, y }) });
+                let (x, y) = xy().resolve(&drawables);
+                drawables.push(Drawable { step_id: step.id, drawable: DrawableData::Point(PointDrawable { x, y }) });
             }
             StepData::DrawLine(start, end) => {
-                let (start_x, start_y) = start().resolve(cx, &drawables);
-                let (end_x, end_y) = end().resolve(cx, &drawables);
+                let (start_x, start_y) = start().resolve(&drawables);
+                let (end_x, end_y) = end().resolve(&drawables);
                 drawables.push(
                         Drawable {
-                            id: step.id,
+                            step_id: step.id,
                             drawable: DrawableData::Line(LineDrawable {
                                 start: PointDrawable { x: start_x, y: start_y },
                                 end: PointDrawable { x: end_x, y: end_y },
@@ -362,7 +370,7 @@ pub fn DrawlingC(cx: Scope) -> impl IntoView {
     ]);
     provide_context(cx, steps);
 
-    let drawables = Signal::derive(cx, move || execute(cx, steps));
+    let drawables = Signal::derive(cx, move || execute(steps));
     provide_context(cx, drawables);
 
     let add_draw_point_step = move |_| { 
