@@ -2,6 +2,7 @@
 
 use leptos::*;
 use serde::{Serialize, Deserialize};
+use web_sys::HtmlCanvasElement;
 
 #[derive(Debug, Clone)]
 pub struct PointXYData {
@@ -23,7 +24,7 @@ impl PointData {
                 match r.get() {
                     None => (0.0, 0.0),
                     Some(r) => {
-                        let found = drawables.iter().filter(|s| s.step_id == r.step_id).next();
+                        let found = drawables.get(r.drawable_id);
                         match found {
                             Some(drawable) => {
                                 match drawable.drawable.snap_points().get(r.snap_point) {
@@ -64,7 +65,7 @@ pub struct Step {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepOption {
-    step_id: usize,
+    drawable_id: usize,
     snap_point: usize,
     name: String
 }
@@ -91,11 +92,11 @@ pub fn options_for(cx: Scope, id: usize) -> Vec<StepOption> {
         }
     }
 
-    for drawable in drawables.iter() {
+    for (drawable_id, drawable) in drawables.iter().enumerate() {
         if step_ids.contains(&drawable.step_id) {
             for sp_id in 0..drawable.drawable.snap_points().len() {
                 opts.push(StepOption {
-                    step_id: drawable.step_id,
+                    drawable_id,
                     snap_point: sp_id,
                     name: format!("{} #{}, SP #{}", steps.iter().find(|s| s.id == drawable.step_id).unwrap().step.describe(), drawable.step_id, sp_id),
                 });
@@ -126,7 +127,7 @@ pub fn PointC(cx: Scope, point: RwSignal<PointData>, step_id: usize) -> impl Int
             }>
                 <For 
                     each=move || options_for(cx, step_id) 
-                    key=|o| o.step_id
+                    key=|o| o.drawable_id
                     view=move |o| {
                         let o_name = o.name.clone();
                         view!{cx, <option value={o}>{o_name}</option> }
@@ -180,7 +181,17 @@ pub fn StepC(cx: Scope, step: Step, set_steps: WriteSignal<Vec<Step>>) -> impl I
 
 #[component]
 pub fn DrawlingCanvasC(cx: Scope, drawables: Signal<Vec<Drawable>>) -> impl IntoView {
-    let canvas = view! { cx, <canvas class="border-2 border-red-600 max-w-full max-h-screen aspect-[8/5]"/> };
+    let (mouse_pos, set_mouse_pos) = create_signal(cx, MousePos::default());
+    let mousemove_callback = move |e: web_sys::MouseEvent| {
+        let canvas_el = e.target().unwrap().dyn_ref::<HtmlCanvasElement>().unwrap().clone();
+        let rect = canvas_el.get_bounding_client_rect();
+        set_mouse_pos.set(MousePos { 
+            x: (e.client_x() as f64 - rect.x() as f64) / rect.width(), 
+            y: (e.client_y() as f64 - rect.y() as f64) / rect.height(),
+        });
+    };
+
+    let canvas = view! { cx, <canvas class="border-2 border-red-600 max-w-full max-h-screen aspect-[8/5]" on:mousemove=mousemove_callback/> };
 
     let context = canvas
         .get_context("2d")
@@ -226,9 +237,23 @@ pub fn DrawlingCanvasC(cx: Scope, drawables: Signal<Vec<Drawable>>) -> impl Into
             }
 
             context.set_stroke_style(&wasm_bindgen::JsValue::from_str("blue"));
-            for sp in drawable.drawable.snap_points() {
+            context.set_fill_style(&wasm_bindgen::JsValue::from_str("blue"));
+            for sp in drawable.drawable.snap_points().iter() {
                 context.begin_path();
                 context.arc(sp.x, sp.y, 1.2, 0.0, std::f64::consts::PI * 2.0).unwrap();
+
+                let mouse_pos = mouse_pos();
+
+                // todo(chad): this is a hack, and doesn't prevent from multiple snap points being
+                // selected. We need to calculate them once in the outer loop and then just pass
+                // which one is selected here.
+                let mx = mouse_pos.x * canvas_width as f64 / scale_factor;
+                let my = mouse_pos.y * canvas_height as f64 / scale_factor;
+                let dist = ((sp.x - mx) * (sp.x - mx) + (sp.y - my) * (sp.y - my)).sqrt();
+                log::debug!("sp: {:?}, mouse_pos: {:?}", sp, (mx, my));
+                if dist < 5.0 {
+                    context.fill();
+                }
                 context.stroke();
             }
         }
@@ -338,6 +363,12 @@ struct DragData {
     prev: f64,
     start: f64,
     sig: Option<WriteSignal<f64>>,
+}
+
+#[derive(Copy, Clone, Default, Debug)]
+struct MousePos {
+    x: f64,
+    y: f64,
 }
 
 #[component]
