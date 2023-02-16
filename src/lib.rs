@@ -114,9 +114,14 @@ pub fn PointC(cx: Scope, point: RwSignal<PointData>, step_id: usize) -> impl Int
             let (x, set_x) = xy.x.split();
             let (y, set_y) = xy.y.split();
             view!{ cx, 
-                <p>"x: " <DraggableNumC d=x set_d=set_x/></p>
-                <p>"y: " <DraggableNumC d=y set_d=set_y/></p>
-                // <button on:click=move |_| xy.y.set(3.0)>"Set y to 3"</button>
+                <div class="flex flex-row">
+                    <p class="mr-1">"x:"</p>
+                    <DraggableNumC d=x set_d=set_x/>
+                </div>
+                <div class="flex flex-row">
+                    <p class="mr-1">"y:"</p>
+                    <DraggableNumC d=y set_d=set_y/>
+                </div>
                 <button on:click=move |_| point.set(PointData::Ref(create_rw_signal(cx, None)))>"Switch it!"</button>
             }.into_view(cx)
         },
@@ -162,7 +167,7 @@ pub fn InnerStepC(cx: Scope, step: Step) -> impl IntoView {
 #[component]
 pub fn StepC(cx: Scope, step: Step, set_steps: WriteSignal<Vec<Step>>) -> impl IntoView {
     view! { cx, 
-        <div class="p-2 m-1 shadow bg-white w-[90%] min-h-[10rem] rounded-lg relative group">
+        <div class="p-2 m-1 shadow bg-white w-[90%] min-h-[15rem] rounded-lg relative group">
             <p class="absolute left-[80%] opacity-0 group-hover:opacity-100 transition-all">
                 {step.id}
             </p>
@@ -191,7 +196,7 @@ pub fn DrawlingCanvasC(cx: Scope, drawables: Signal<Vec<Drawable>>) -> impl Into
         });
     };
 
-    let canvas = view! { cx, <canvas class="border-2 border-red-600 max-w-full max-h-screen aspect-[8/5]" on:mousemove=mousemove_callback/> };
+    let canvas = view! { cx, <canvas class="border-2 border-gray-800 max-w-full max-h-screen aspect-[8/5]" on:mousemove=mousemove_callback/> };
 
     let context = canvas
         .get_context("2d")

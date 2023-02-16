@@ -31,11 +31,12 @@
 ---
 
 ## General Concepts
+    - [ ] Zoom/pan
     - [x] Snap points
         - [x] as destinations
         - [ ] add a snap point at all intersections between drawables?
     - [x] Recognize objects that have been drawn (like circles, paths, rects, lines, points, etc.)
-    - [ ] Point/click selection of objects
+    - [-] Point/click selection of objects
     - [ ] Expressions (?) as in, draw point at max(some_array) / len(some_array)
         - Probably use Rhai for this
     - [ ] Guides (temporary variables, hidden)
