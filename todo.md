@@ -25,12 +25,19 @@
 
 # Data
     - [ ] Data pane for pictures
+        - [ ] Number data
+        - [ ] Point data
+        - [ ] Color data
     - [ ] Edit data for primative commands
         - Stroke/fill color, line thickness, font size, etc.
 
 ---
 
 ## General Concepts
+    - [ ] Cursor (active step)
+        - [ ] Visually see which steps are active (up to the current, the rest should be greyed/muted)
+        - [ ] Canvas should reflect only up to the active
+        - [ ] Use arrow keys to navigate
     - [ ] Zoom/pan
     - [x] Snap points
         - [x] as destinations

@@ -1,200 +1,461 @@
-#![feature(drain_filter)]
-
 use leptos::*;
-use serde::{Serialize, Deserialize};
-use web_sys::HtmlCanvasElement;
 
-#[derive(Debug, Clone)]
-pub struct PointXYData {
-    x: RwSignal<f64>,
-    y: RwSignal<f64>,
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ResolvableToNumber {
+    Number(RwSignal<f64>),
 }
 
-#[derive(Debug, Clone)]
-pub enum PointData {
-    Xy(PointXYData),
-    Ref(RwSignal<Option<StepOption>>),
+trait ResolveToNumber {
+    fn resolve(&self, cx: Scope) -> f64;
 }
 
-impl PointData {
-    fn resolve(&self, drawables: &Vec<Drawable>) -> (f64, f64) {
+impl ResolveToNumber for ResolvableToNumber {
+    fn resolve(&self, _cx: Scope) -> f64 {
         match self {
-            PointData::Xy(PointXYData { x, y }) => (x(), y()),
-            PointData::Ref(r) => {
-                match r.get() {
-                    None => (0.0, 0.0),
-                    Some(r) => {
-                        let found = drawables.get(r.drawable_id);
-                        match found {
-                            Some(drawable) => {
-                                match drawable.drawable.snap_points().get(r.snap_point) {
-                                    Some(point) => (point.x, point.y),
-                                    _ => (0.0, 0.0)
-                                }
+            ResolvableToNumber::Number(n) => n.get(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointSignal {
+    pub x: RwSignal<ResolvableToNumber>,
+    pub y: RwSignal<ResolvableToNumber>,
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct Point {
+    pub x: f64,
+    pub y: f64,
+}
+
+trait ResolveToPoint {
+    fn resolve(&self, cx: Scope) -> Point;
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResolvableTo<T>
+where
+    T: Clone + PartialEq,
+{
+    T(T),
+    Ref(DataRef),
+}
+
+impl ResolveToPoint for ResolvableTo<PointSignal> {
+    fn resolve(&self, cx: Scope) -> Point {
+        match self {
+            ResolvableTo::T(point) => Point {
+                x: point.x.get().resolve(cx),
+                y: point.y.get().resolve(cx),
+            },
+            ResolvableTo::Ref(snap_point) => snap_point.resolve(cx),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum StepData {
+    DrawPoint(RwSignal<ResolvableTo<PointSignal>>),
+    DrawLine {
+        start: RwSignal<ResolvableTo<PointSignal>>,
+        end: RwSignal<ResolvableTo<PointSignal>>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DataRefPathEl {
+    Step,
+    Data,
+    WithId(usize),
+    PropName(&'static str),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DataRef(Vec<DataRefPathEl>);
+
+impl DataRef {
+    pub fn desc(&self) -> String {
+        self.0
+            .iter()
+            .map(|el| match el {
+                DataRefPathEl::Step => "step".to_string(),
+                DataRefPathEl::Data => "data".to_string(),
+                DataRefPathEl::WithId(id) => format!("[{}]", id),
+                DataRefPathEl::PropName(name) => format!(".{}", name),
+            })
+            .collect::<Vec<String>>()
+            .join("")
+    }
+}
+
+impl ResolveToPoint for DataRef {
+    fn resolve(&self, cx: Scope) -> Point {
+        match self.0[0] {
+            DataRefPathEl::Step => {
+                let step_id = match self.0[1] {
+                    DataRefPathEl::WithId(i) => i,
+                    _ => todo!(),
+                };
+                let step = use_context::<RwSignal<Vec<Step>>>(cx)
+                    .unwrap()
+                    .with(|steps| {
+                        steps
+                            .iter()
+                            .find(|d| d.id == step_id)
+                            .cloned()
+                            .expect("Invalid step id")
+                    });
+                let prop_name = match self.0[2] {
+                    DataRefPathEl::PropName(s) => s,
+                    _ => todo!(),
+                };
+                match step.data {
+                    StepData::DrawPoint(point) => match prop_name {
+                        "self" => point.get().resolve(cx),
+                        _ => panic!(
+                            "Invalid prop name '{}': expected one of [{:?}]",
+                            prop_name, "self"
+                        ),
+                    },
+                    StepData::DrawLine { start, end } => {
+                        let start = start.get().resolve(cx);
+                        let end = end.get().resolve(cx);
+
+                        match prop_name {
+                            "start" => start,
+                            "mid" => Point {
+                                x: (start.x + end.x) / 2.0,
+                                y: (start.y + end.y) / 2.0,
                             },
-                            _ => (0.0, 0.0),
+                            "end" => end,
+                            _ => panic!(
+                                "Invalid prop name '{}': expected one of [{:?}]",
+                                prop_name,
+                                &["start", "mid", "end"]
+                            ),
                         }
                     }
                 }
             }
+            DataRefPathEl::Data => todo!(),
+            _ => todo!(),
         }
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum StepData {
-    DrawPoint(RwSignal<PointData>),
-    DrawLine(RwSignal<PointData>, RwSignal<PointData>),
-    // Translate(RwSignal<usize>),
-}
-
-impl StepData {
-    pub fn describe(&self) -> String {
-        match self {
-            Self::DrawPoint(_) => String::from("DrawPoint"),
-            Self::DrawLine(_, _) => String::from("DrawLine"),
+impl Step {
+    pub fn snap_points(&self) -> Vec<DataRef> {
+        match self.data {
+            StepData::DrawPoint(_) => vec![DataRef(vec![
+                DataRefPathEl::Step,
+                DataRefPathEl::WithId(self.id),
+                DataRefPathEl::PropName("self"),
+            ])],
+            StepData::DrawLine { .. } => vec![
+                DataRef(vec![
+                    DataRefPathEl::Step,
+                    DataRefPathEl::WithId(self.id),
+                    DataRefPathEl::PropName("start"),
+                ]),
+                DataRef(vec![
+                    DataRefPathEl::Step,
+                    DataRefPathEl::WithId(self.id),
+                    DataRefPathEl::PropName("mid"),
+                ]),
+                DataRef(vec![
+                    DataRefPathEl::Step,
+                    DataRefPathEl::WithId(self.id),
+                    DataRefPathEl::PropName("end"),
+                ]),
+            ],
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Copy, Debug)]
 pub struct Step {
-    id: usize,
-    step: StepData,
+    pub id: usize,
+    pub data: StepData,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StepOption {
-    drawable_id: usize,
-    snap_point: usize,
-    name: String
+#[derive(Clone, Copy, Debug)]
+pub enum DataData {
+    Number(RwSignal<f64>),
+    Point(RwSignal<PointSignal>),
 }
 
-impl IntoAttribute for StepOption {
-    fn into_attribute(self, _cx: Scope) -> Attribute {
-        Attribute::String(serde_json::to_string(&self).unwrap())
+#[derive(Clone, Copy, Debug)]
+pub struct Data {
+    pub id: usize,
+    pub data: DataData,
+}
+
+#[derive(Copy, Clone, Default)]
+struct DragData {
+    initial_value: f64,
+    start: f64,
+}
+
+#[component]
+pub fn DraggableNumView(cx: Scope, d: RwSignal<f64>) -> impl IntoView {
+    let (d, set_d) = d.split();
+
+    let (drag_data, set_drag_data) = create_signal(cx, DragData::default());
+
+    let mousemove_callback = move |e: web_sys::MouseEvent| {
+        let delta = drag_data().start - e.y() as f64;
+        set_d(drag_data().initial_value + delta);
+    };
+    let mousemove_closure =
+        wasm_bindgen::prelude::Closure::<dyn Fn(_)>::new(mousemove_callback).into_js_value();
+    let mousemove_closure_clone = mousemove_closure.clone();
+
+    let mouseup_callback = move |_e: web_sys::MouseEvent| {
+        document()
+            .remove_event_listener_with_callback(
+                "mousemove",
+                mousemove_closure.as_ref().unchecked_ref(),
+            )
+            .unwrap();
+    };
+    let mouseup_closure = wasm_bindgen::prelude::Closure::<dyn Fn(_)>::new(mouseup_callback);
+
+    let mousedown_callback = move |e: web_sys::MouseEvent| {
+        set_drag_data.update(|dd| {
+            dd.initial_value = d();
+            dd.start = e.y() as f64;
+        });
+
+        document()
+            .add_event_listener_with_callback(
+                "mousemove",
+                mousemove_closure_clone.as_ref().unchecked_ref(),
+            )
+            .unwrap();
+
+        document()
+            .add_event_listener_with_callback("mouseup", mouseup_closure.as_ref().unchecked_ref())
+            .unwrap();
+    };
+
+    view! { cx,
+        <div
+            on:mousedown=mousedown_callback
+            style="user-select: none"
+        >
+            {d}
+        </div>
     }
 }
 
-pub fn options_for(cx: Scope, id: usize) -> Vec<StepOption> {
-    let mut opts = Vec::new();
+#[derive(PartialEq, Copy, Clone, Debug)]
+pub struct InferTarget(RwSignal<ResolvableTo<PointSignal>>);
 
-    let steps = use_context::<ReadSignal<Vec<Step>>>(cx).unwrap().get();
-    let drawables = use_context::<Signal<Vec<Drawable>>>(cx).unwrap().get();
-
-    let mut step_ids = Vec::new();
-    for step in steps.iter() {
-        if step.id == id {
-            break;
-        }
-        else {
-            step_ids.push(step.id);
-        }
+#[component]
+fn ResolvableToNumberView(cx: Scope, n: RwSignal<ResolvableToNumber>) -> impl IntoView {
+    match n.get() {
+        ResolvableToNumber::Number(n) => view! { cx,
+            <DraggableNumView d=n />
+        },
     }
+}
 
-    for (drawable_id, drawable) in drawables.iter().enumerate() {
-        if step_ids.contains(&drawable.step_id) {
-            for sp_id in 0..drawable.drawable.snap_points().len() {
-                opts.push(StepOption {
-                    drawable_id,
-                    snap_point: sp_id,
-                    name: format!("{} #{}, SP #{}", steps.iter().find(|s| s.id == drawable.step_id).unwrap().step.describe(), drawable.step_id, sp_id),
-                });
+#[component]
+fn InnerStepViewDrawPoint(
+    cx: Scope,
+    sig: RwSignal<ResolvableTo<PointSignal>>,
+    point: PointSignal,
+) -> impl IntoView {
+    move || {
+        let context_infer_target = use_context::<RwSignal<Option<InferTarget>>>(cx).unwrap();
+        if let Some(it) = context_infer_target.get() {
+            if sig == it.0 {
+                return view! { cx,
+                    <div class="flex flex-col">
+                        <p>"..."</p>
+                        <button class="border-2 border-gray-800 mt-4" on:click=move |_| {
+                            context_infer_target.set(None);
+                        }>
+                            "Cancel Infer"
+                        </button>
+                    </div>
+                }
+                .into_view(cx);
             }
         }
-    }
 
-    opts
-}
-
-#[component]
-pub fn PointC(cx: Scope, point: RwSignal<PointData>, step_id: usize) -> impl IntoView {
-    move || match point.get() {
-        PointData::Xy(xy) => {
-            view!{ cx, 
+        view! { cx,
+            <div class="flex flex-col">
+                <p>"Draw Point"</p>
                 <div class="flex flex-row">
-                    <p class="mr-1">"x:"</p>
-                    <DraggableNumC d=xy.x/>
+                    <p>"x: "</p>
+                    <ResolvableToNumberView n={point.x} />
+                    <p class="ml-3">"y: "</p>
+                    <ResolvableToNumberView n={point.y} />
                 </div>
-                <div class="flex flex-row">
-                    <p class="mr-1">"y:"</p>
-                    <DraggableNumC d=xy.y/>
-                </div>
-                <button on:click=move |_| point.set(PointData::Ref(create_rw_signal(cx, None)))>"Switch it!"</button>
-            }.into_view(cx)
-        },
-        PointData::Ref(r) => view! { cx,
-            <p>"Ref"</p>
-            // <select on:change=move |e| { 
-            //     r.set(Some(serde_json::from_str::<StepOption>(&event_target_value(&e)).unwrap())) 
-            // }>
-            //     <For 
-            //         each=move || options_for(cx, step_id) 
-            //         key=|o| o.drawable_id
-            //         view=move |o| {
-            //             let o_name = o.name.clone();
-            //             view!{cx, <option value={o}>{o_name}</option> }
-            //         }
-            //     />
-            // </select>
-            <button on:click=move |_| point.set(PointData::Xy(PointXYData { x: create_rw_signal(cx, 0.0), y: create_rw_signal(cx, 0.0) }))>"Switch it!"</button>
-        }.into_view(cx)
-    }
-}
-
-#[component]
-pub fn InnerStepC(cx: Scope, step: Step) -> impl IntoView {
-    match step.step {
-        StepData::DrawPoint(point) => {
-            view! { cx,
-                <PointC point step_id={step.id}/>
-            }.into_view(cx)
-        },
-        StepData::DrawLine(start, end) => {
-            view! { cx,
-                <p>"start:"</p>
-                <PointC point=start step_id={step.id}/>
-
-                <p>"end:"</p>
-                <PointC point=end step_id={step.id}/>
-            }.into_view(cx)
+                <button class="border-2 border-gray-800 mt-4" on:click=move |_| {
+                    context_infer_target.set(Some(InferTarget(sig)));
+                }>
+                    "Infer"
+                </button>
+            </div>
         }
+        .into_view(cx)
     }
 }
 
 #[component]
-pub fn StepC(cx: Scope, step: Step, set_steps: WriteSignal<Vec<Step>>) -> impl IntoView {
-    view! { cx, 
-        <div class="p-2 m-1 shadow bg-white w-[90%] min-h-[15rem] rounded-lg relative group">
-            <p class="absolute left-[80%] opacity-0 group-hover:opacity-100 transition-all">
-                {step.id}
-            </p>
-            <button 
+fn InnerStepViewResolveableToPoint(
+    cx: Scope,
+    point: RwSignal<ResolvableTo<PointSignal>>,
+) -> impl IntoView {
+    move || match point() {
+        ResolvableTo::T(p) => view! { cx,
+            <InnerStepViewDrawPoint sig=point point=p />
+        }
+        .into_view(cx),
+        ResolvableTo::Ref(dr) => {
+            let context_infer_target = use_context::<RwSignal<Option<InferTarget>>>(cx).unwrap();
+            view! { cx,
+                <div>{dr.desc()}</div>
+                <button class="border-2 border-gray-800 mt-4" on:click=move |_| {
+                    context_infer_target.set(Some(InferTarget(point)));
+                }>
+                    "Infer"
+                </button>
+            }
+        }
+        .into_view(cx),
+    }
+}
+
+#[component]
+fn InnerStepViewDrawLine(
+    cx: Scope,
+    start: RwSignal<ResolvableTo<PointSignal>>,
+    end: RwSignal<ResolvableTo<PointSignal>>,
+) -> impl IntoView {
+    view! { cx,
+        <div class="flex flex-col">
+            <p>"Draw Line"</p>
+
+            <p>"start: "</p>
+            <InnerStepViewResolveableToPoint point={start} />
+
+            <p>"end: "</p>
+            <InnerStepViewResolveableToPoint point={end} />
+        </div>
+    }
+}
+
+#[component]
+pub fn InnerStepView(cx: Scope, step: Step) -> impl IntoView {
+    move || match step.data {
+        StepData::DrawPoint(point) => match point.get() {
+            ResolvableTo::T(p) => view! { cx,
+                <InnerStepViewDrawPoint sig=point point=p />
+            }
+            .into_view(cx),
+            ResolvableTo::Ref(dr) => {
+                view! { cx,
+                    <div>"TODO"</div>
+                <div>{dr.desc()}</div>
+                }
+            }
+            .into_view(cx),
+        },
+        StepData::DrawLine { start, end } => view! { cx,
+            <InnerStepViewDrawLine start end />
+        }
+        .into_view(cx),
+    }
+}
+
+#[component]
+pub fn StepView(cx: Scope, step: Step) -> impl IntoView {
+    view! { cx,
+        <div class="p-2 m-1 shadow bg-white w-[90%] rounded-lg relative group">
+            <button
                 class="absolute left-[90%] opacity-0 group-hover:opacity-100 transition-all"
-                on:click=move |_| set_steps.update(|s| { s.drain_filter(|s| s.id == step.id); })>
+                on:click=move |_| {
+                    use_context::<RwSignal<Vec<Step>>>(cx).unwrap().update(|s| {
+                        s.retain(|s| s.id != step.id);
+                    });
+                }>
                 "x"
             </button>
             <div class="w-full h-full flex flex-col">
                 <p>"Step #" {step.id}</p>
-                <InnerStepC step/>
+                <InnerStepView step/>
             </div>
         </div>
     }
 }
 
 #[component]
-pub fn DrawlingCanvasC(cx: Scope, drawables: Signal<Vec<Drawable>>) -> impl IntoView {
-    let (mouse_pos, set_mouse_pos) = create_signal(cx, MousePos::default());
-    let mousemove_callback = move |e: web_sys::MouseEvent| {
-        let canvas_el = e.target().unwrap().dyn_ref::<HtmlCanvasElement>().unwrap().clone();
-        let rect = canvas_el.get_bounding_client_rect();
-        set_mouse_pos.set(MousePos { 
-            x: (e.client_x() as f64 - rect.x() as f64) / rect.width(), 
-            y: (e.client_y() as f64 - rect.y() as f64) / rect.height(),
-        });
-    };
+pub fn InnerDataViewPoint(cx: Scope, point: PointSignal) -> impl IntoView {
+    view! { cx,
+        <div class="flex flex-row">
+            <p>"x: "</p>
+            <ResolvableToNumberView n={point.x} />
+            <p class="ml-3">"y: "</p>
+            <ResolvableToNumberView n={point.y} />
+        </div>
+    }
+}
 
-    let canvas = view! { cx, <canvas class="border-2 border-gray-800 max-w-full max-h-screen aspect-[8/5]" on:mousemove=mousemove_callback/> };
+#[component]
+pub fn InnerDataView(cx: Scope, data: Data) -> impl IntoView {
+    move || match data.data {
+        DataData::Number(n) => view! { cx,
+            <div>
+                <p>"Number"</p>
+                <DraggableNumView d={n} />
+            </div>
+        }
+        .into_view(cx),
+        DataData::Point(p) => view! { cx,
+            <div>
+                <p>"Point"</p>
+                <InnerDataViewPoint point={p.get()} />
+            </div>
+        }
+        .into_view(cx),
+    }
+}
+
+#[component]
+pub fn DataView(cx: Scope, data: Data) -> impl IntoView {
+    view! { cx,
+        <div class="p-2 m-1 shadow bg-white w-[90%] rounded-lg relative group">
+            <button
+                class="absolute left-[90%] opacity-0 group-hover:opacity-100 transition-all"
+                on:click=move |_| {
+                    use_context::<RwSignal<Vec<Data>>>(cx).unwrap().update(|s| {
+                        s.retain(|d| d.id != data.id);
+                    });
+                }>
+                "x"
+            </button>
+            <div class="w-full h-full flex flex-col">
+                <p>"Data #" {data.id}</p>
+                <InnerDataView data/>
+            </div>
+        </div>
+    }
+}
+
+#[component]
+pub fn DrawlingCanvasView(cx: Scope, steps: RwSignal<Vec<Step>>) -> impl IntoView {
+    let scale_factor = 16.0f64;
+
+    let canvas = view! { cx,
+        <canvas class="border-2 border-gray-800 max-w-screen max-h-screen" />
+    };
+    let canvas_clone_mousemove = canvas.clone();
+
+    let (mouse_pos, set_mouse_pos) = create_signal(cx, Point::default());
 
     let context = canvas
         .get_context("2d")
@@ -203,9 +464,9 @@ pub fn DrawlingCanvasC(cx: Scope, drawables: Signal<Vec<Drawable>>) -> impl Into
         .dyn_into::<web_sys::CanvasRenderingContext2d>()
         .unwrap();
 
-    let scale_factor = 16.0f64;
     let current_aspect_ratio = canvas.width() as f64 / canvas.height() as f64;
-    let desired_aspect_ratio = 8.0f64 / 5.0f64;
+    // let desired_aspect_ratio = 8.0f64 / 5.0f64;
+    let desired_aspect_ratio = current_aspect_ratio;
     let width_scale_factor = (desired_aspect_ratio / current_aspect_ratio).sqrt();
     let height_scale_factor = 1.0 / width_scale_factor;
 
@@ -218,241 +479,281 @@ pub fn DrawlingCanvasC(cx: Scope, drawables: Signal<Vec<Drawable>>) -> impl Into
     let canvas_width = canvas.width();
     let canvas_height = canvas.height();
 
+    // todo(chad): make mouse_pos a PointSignal
+    let hover_infer_target = create_rw_signal(
+        cx,
+        Some(ResolvableTo::T(PointSignal {
+            x: create_rw_signal(
+                cx,
+                ResolvableToNumber::Number(create_rw_signal(cx, mouse_pos().x)),
+            ),
+            y: create_rw_signal(
+                cx,
+                ResolvableToNumber::Number(create_rw_signal(cx, mouse_pos().y)),
+            ),
+        })),
+    );
+
+    let mousemove_callback = move |e: web_sys::MouseEvent| {
+        let rect = canvas_clone_mousemove.get_bounding_client_rect();
+        set_mouse_pos.set(Point {
+            x: (e.client_x() as f64 - rect.x() as f64) / rect.width() as f64 * canvas_width as f64
+                / scale_factor,
+            y: (e.client_y() as f64 - rect.y() as f64) / rect.height() as f64
+                * canvas_height as f64
+                / scale_factor,
+        });
+    };
+    let mousemove_closure =
+        wasm_bindgen::prelude::Closure::<dyn Fn(_)>::new(mousemove_callback).into_js_value();
+    canvas
+        .add_event_listener_with_callback("mousemove", mousemove_closure.as_ref().unchecked_ref())
+        .unwrap();
+
+    let mousedown_callback = move |_e: web_sys::MouseEvent| {
+        let context_infer_target = use_context::<RwSignal<Option<InferTarget>>>(cx).unwrap();
+
+        if let (Some(it), Some(hover_infer_target)) =
+            (context_infer_target.get(), hover_infer_target.get())
+        {
+            it.0.set(hover_infer_target);
+            context_infer_target.set(None);
+        }
+    };
+    let mousedown_closure =
+        wasm_bindgen::prelude::Closure::<dyn Fn(_)>::new(mousedown_callback).into_js_value();
+    canvas
+        .add_event_listener_with_callback("mousedown", mousedown_closure.as_ref().unchecked_ref())
+        .unwrap();
+
+    let snap_points: Memo<Vec<DataRef>> = create_memo(cx, move |_| {
+        console_log("Memoizing snap points!");
+        steps.with(|steps| steps.iter().map(|s| s.snap_points()).flatten().collect())
+    });
+
     create_effect(cx, move |_| {
+        // console_log("running the effect!");
+
         context.clear_rect(0.0, 0.0, canvas_width as f64, canvas_height as f64);
-        for drawable in drawables().iter() {
-            context.set_stroke_style(&wasm_bindgen::JsValue::from_str("black"));
-            match drawable.drawable {
-                DrawableData::Point(PointDrawable { x, y }) => {
-                    context.begin_path();
-                    context.arc(x, y, 0.8, 0.0, std::f64::consts::PI * 2.0).unwrap();
-                    context.stroke();
-                },
-                DrawableData::Line(LineDrawable { 
-                    start: PointDrawable { x: start_x, y :start_y }, 
-                    end: PointDrawable { x: end_x, y :end_y }, 
-                }) => {
-                    context.begin_path();
-                    context.move_to(start_x, start_y);
-                    context.line_to(end_x, end_y);
-                    context.stroke();
+
+        steps.with(|steps| {
+            for step in steps.iter() {
+                match step.data {
+                    StepData::DrawPoint(point) => match point() {
+                        ResolvableTo::T(point) => {
+                            context.begin_path();
+                            context
+                                .arc(
+                                    point.x.get().resolve(cx),
+                                    point.y.get().resolve(cx),
+                                    1.0,
+                                    0.0,
+                                    std::f64::consts::PI * 2.0,
+                                )
+                                .unwrap();
+                            context.stroke();
+                        }
+                        ResolvableTo::Ref { .. } => todo!(),
+                    },
+                    StepData::DrawLine { start, end } => {
+                        let start: Point = start().resolve(cx);
+                        let end: Point = end().resolve(cx);
+
+                        context.begin_path();
+                        context.move_to(start.x, start.y);
+                        context.line_to(end.x, end.y);
+                        context.stroke();
+                    }
                 }
             }
+        });
 
-            context.set_stroke_style(&wasm_bindgen::JsValue::from_str("blue"));
-            context.set_fill_style(&wasm_bindgen::JsValue::from_str("blue"));
-            for sp in drawable.drawable.snap_points().iter() {
+        snap_points.with(|snap_points| {
+            for sp in snap_points.iter() {
+                context.set_stroke_style(&wasm_bindgen::JsValue::from_str("red"));
+
+                let sp = sp.resolve(cx);
+
                 context.begin_path();
-                context.arc(sp.x, sp.y, 1.2, 0.0, std::f64::consts::PI * 2.0).unwrap();
-
-                let mouse_pos = mouse_pos();
-
-                // todo(chad): this is a hack, and doesn't prevent from multiple snap points being
-                // selected. We need to calculate them once in the outer loop and then just pass
-                // which one is selected here.
-                let mx = mouse_pos.x * canvas_width as f64 / scale_factor;
-                let my = mouse_pos.y * canvas_height as f64 / scale_factor;
-                let dist = ((sp.x - mx) * (sp.x - mx) + (sp.y - my) * (sp.y - my)).sqrt();
-                log::debug!("sp: {:?}, mouse_pos: {:?}", sp, (mx, my));
-                if dist < 5.0 {
-                    context.fill();
-                }
+                context
+                    .arc(sp.x, sp.y, 1.3, 0.0, std::f64::consts::PI * 2.0)
+                    .unwrap();
                 context.stroke();
+            }
+        });
+
+        let context_infer_target = use_context::<RwSignal<Option<InferTarget>>>(cx).unwrap();
+        if context_infer_target.get().is_some() {
+            hover_infer_target.set(Some(ResolvableTo::T(PointSignal {
+                x: create_rw_signal(
+                    cx,
+                    ResolvableToNumber::Number(create_rw_signal(cx, mouse_pos().x)),
+                ),
+                y: create_rw_signal(
+                    cx,
+                    ResolvableToNumber::Number(create_rw_signal(cx, mouse_pos().y)),
+                ),
+            })));
+
+            // todo(chad): @Performance
+            // This subscribes the effect to any mouse move changes, which is a lot of unnecessary runs.
+            // We should only run this effect when the mouse movement causes a change to the currently selected snap point.
+            snap_points.with(|snap_points| {
+                for sp in snap_points.iter() {
+                    let spr = sp.resolve(cx);
+                    let dist =
+                        ((spr.x - mouse_pos().x).powi(2) + (spr.y - mouse_pos().y).powi(2)).sqrt();
+                    if dist < 5.0 {
+                        hover_infer_target.set(Some(ResolvableTo::Ref(sp.clone())));
+                    }
+                }
+            });
+        }
+
+        if let Some(hit) = hover_infer_target.get() {
+            let mut fill = false;
+            if let ResolvableTo::Ref(_) = hit {
+                context.set_fill_style(&wasm_bindgen::JsValue::from_str("green"));
+                fill = true;
+            }
+
+            let hit = hit.resolve(cx);
+            context.begin_path();
+            context.set_stroke_style(&wasm_bindgen::JsValue::from_str("green"));
+            context
+                .arc(hit.x, hit.y, 1.0, 0.0, std::f64::consts::PI * 2.0)
+                .unwrap();
+            context.stroke();
+            if fill {
+                context.fill();
             }
         }
     });
 
     view! { cx,
-        <div class="block grow self-center"> 
+        <div class="block grow self-center">
             { canvas }
         </div>
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-struct Point {
-    x: f64,
-    y: f64,
-}
-
-type PointDrawable = Point;
-
-#[derive(Debug, Copy, Clone)]
-struct LineDrawable {
-    start: PointDrawable,
-    end: PointDrawable,
-}
-
-#[derive(Debug, Copy, Clone)]
-enum DrawableData {
-    Point(PointDrawable),
-    Line(LineDrawable),
-}
-
-#[derive(Debug, Copy, Clone)]
-pub struct Drawable {
-    step_id: usize,
-    drawable: DrawableData,
-}
-
-impl DrawableData {
-    fn snap_points(&self) -> Vec<Point> {
-        match self {
-            DrawableData::Point(p) => vec![*p],
-            DrawableData::Line(LineDrawable { start, end, }) => vec![
-                *start,
-                Point {
-                    x: (start.x + end.x) / 2.0,
-                    y: (start.y + end.y) / 2.0,
-                },
-                *end,
-            ]
-        }
-    }
-}
-
-fn execute(steps: ReadSignal<Vec<Step>>) -> Vec<Drawable> {
-    let mut drawables = Vec::new();
-
-    for step in steps().iter() {
-        match step.step {
-            StepData::DrawPoint(xy) => {
-                let (x, y) = xy().resolve(&drawables);
-                drawables.push(Drawable { step_id: step.id, drawable: DrawableData::Point(PointDrawable { x, y }) });
-            }
-            StepData::DrawLine(start, end) => {
-                let (start_x, start_y) = start().resolve(&drawables);
-                let (end_x, end_y) = end().resolve(&drawables);
-                drawables.push(
-                    Drawable {
-                        step_id: step.id,
-                        drawable: DrawableData::Line(LineDrawable {
-                            start: PointDrawable { x: start_x, y: start_y },
-                            end: PointDrawable { x: end_x, y: end_y },
-                        })
-                    }
-                    );
-            }
-        }
-    }
-
-    drawables
-}
-
 #[component]
-pub fn DraggableNumC(cx: Scope, d: RwSignal<f64>) -> impl IntoView {
-    let (d, set_d) = d.split();
+pub fn DrawlingView(cx: Scope) -> impl IntoView {
+    let datas = create_rw_signal::<Vec<Data>>(cx, Vec::new());
 
-    let set_drag_data = use_context::<WriteSignal<DragData>>(cx).unwrap();
-
-    let mousedown_callback = move |e: web_sys::MouseEvent| { 
-        set_drag_data.update(|dd| { 
-            dd.prev = d();
-            dd.start = e.y() as f64;
-            dd.sig = Some(set_d); 
-        }); 
-    };
-
-    view! { cx,
-        <div 
-            on:mousedown=mousedown_callback 
-            style="user-select: none"
-        >
-            {d}
-        </div>
-    }
-}
-
-#[derive(Copy, Clone, Default)]
-struct DragData {
-    prev: f64,
-    start: f64,
-    sig: Option<WriteSignal<f64>>,
-}
-
-#[derive(Copy, Clone, Default, Debug)]
-struct MousePos {
-    x: f64,
-    y: f64,
-}
-
-#[component]
-pub fn DrawlingC(cx: Scope) -> impl IntoView {
-    let (drag_data, set_drag_data) = create_signal(cx, DragData::default());
-    provide_context(cx, set_drag_data);
-
-    // let (id, set_id) = create_signal(cx, 1);
-    let mut id = 1;
-
-    let (steps, set_steps) = create_signal::<Vec<Step>>(cx, vec![
-                                                        Step {
-                                                            id: 0,
-                                                            step: StepData::DrawPoint(create_rw_signal(cx, 
-                                                                                                       PointData::Xy(
-                                                                                                           PointXYData { 
-                                                                                                               x: create_rw_signal(cx, 0.0), 
-                                                                                                               y: create_rw_signal(cx, 0.0) 
-                                                                                                           })))
-                                                        }
-    ]);
+    let steps = create_rw_signal::<Vec<Step>>(cx, Vec::new());
     provide_context(cx, steps);
 
-    let drawables = Signal::derive(cx, move || execute(steps));
-    provide_context(cx, drawables);
+    let infer_target: RwSignal<Option<InferTarget>> = create_rw_signal(cx, None);
+    provide_context(cx, infer_target);
 
-    let add_draw_point_step = move |_| { 
-        let new_step = Step { id: id, step: StepData::DrawPoint(create_rw_signal(cx, 
-                                                                                   PointData::Xy(
-                                                                                       PointXYData { 
-                                                                                           x: create_rw_signal(cx, 0.0), 
-                                                                                           y: create_rw_signal(cx, 0.0) 
-                                                                                       }))) 
-        };
+    console_log("DrawlingView Setup");
 
-        set_steps.update(|s| {
-            s.push(new_step);
-            id += 1;
+    let add_draw_line_step = move |_| {
+        steps.update(|s| {
+            s.push(Step {
+                id: s.len(),
+                data: StepData::DrawLine {
+                    start: create_rw_signal(
+                        cx,
+                        ResolvableTo::T(PointSignal {
+                            x: create_rw_signal(
+                                cx,
+                                ResolvableToNumber::Number(create_rw_signal(cx, 0.0)),
+                            ),
+                            y: create_rw_signal(
+                                cx,
+                                ResolvableToNumber::Number(create_rw_signal(cx, 0.0)),
+                            ),
+                        }),
+                    ),
+                    end: create_rw_signal(
+                        cx,
+                        ResolvableTo::T(PointSignal {
+                            x: create_rw_signal(
+                                cx,
+                                ResolvableToNumber::Number(create_rw_signal(cx, 0.0)),
+                            ),
+                            y: create_rw_signal(
+                                cx,
+                                ResolvableToNumber::Number(create_rw_signal(cx, 0.0)),
+                            ),
+                        }),
+                    ),
+                },
+            })
+        });
+    };
+    let add_draw_point_step = move |_| {
+        steps.update(|s| {
+            s.push(Step {
+                id: s.len(),
+                data: StepData::DrawPoint(create_rw_signal(
+                    cx,
+                    ResolvableTo::T(PointSignal {
+                        x: create_rw_signal(
+                            cx,
+                            ResolvableToNumber::Number(create_rw_signal(cx, 0.0)),
+                        ),
+                        y: create_rw_signal(
+                            cx,
+                            ResolvableToNumber::Number(create_rw_signal(cx, 0.0)),
+                        ),
+                    }),
+                )),
+            })
         });
     };
 
-    let add_draw_line_step = move |_| { 
-        let start = create_rw_signal(cx, 
-                                     PointData::Xy(
-                                         PointXYData { 
-                                             x: create_rw_signal(cx, 0.0), 
-                                             y: create_rw_signal(cx, 0.0) 
-                                         }));
-
-        let end = create_rw_signal(cx, 
-                                     PointData::Xy(
-                                         PointXYData { 
-                                             x: create_rw_signal(cx, 0.0), 
-                                             y: create_rw_signal(cx, 0.0) 
-                                         }));
-
-        let new_step = Step { id: id, step: StepData::DrawLine(start, end) };
-
-        set_steps.update(|s| {
-            s.push(new_step);
-            id += 1;
+    let add_number_data = move |_| {
+        datas.update(|d| {
+            d.push(Data {
+                id: d.len(),
+                data: DataData::Number(create_rw_signal(cx, 0.0)),
+            })
         });
     };
-
-    let classes = "mb-6 bg-blue-500 hover:bg-blue-700 py-4 px-2 text-white rounded w-[12rem] max-w-[85%] self-center";   
-
-    let mousemove_callback = move |e: web_sys::MouseEvent| {
-        if let DragData { prev, start, sig: Some(set_d) } = drag_data() {
-            set_d(prev + start - e.y() as f64);
-        }
-    };
-    
-    let mouseup_callback = move |_: web_sys::MouseEvent| {
-        set_drag_data.update(|dd| dd.sig = None);
+    let add_point_data = move |_| {
+        datas.update(|d| {
+            d.push(Data {
+                id: d.len(),
+                data: DataData::Point(create_rw_signal(
+                    cx,
+                    PointSignal {
+                        x: create_rw_signal(
+                            cx,
+                            ResolvableToNumber::Number(create_rw_signal(cx, 0.0)),
+                        ),
+                        y: create_rw_signal(
+                            cx,
+                            ResolvableToNumber::Number(create_rw_signal(cx, 0.0)),
+                        ),
+                    },
+                )),
+            })
+        });
     };
 
     view! { cx,
-        <div class="flex flex-row h-screen w-screen" on:mousemove=mousemove_callback on:mouseup=mouseup_callback>
-            <div class="flex flex-col basis-1/6 max-w-[20rem] min-w-[10rem] bg-slate-200">
+        <div class="flex flex-row h-screen w-screen">
+            <div class="flex flex-col basis-1/6 max-w-[20rem] min-w-[13rem] bg-slate-200">
+                <h3 class="text-3xl text-center m-3">"Data"</h3>
+                <div class="flex flex-col justify-self-end self-center">
+                    <button class= "mb-6 bg-blue-500 hover:bg-blue-700 py-2 px-1 text-white rounded w-[12rem] max-w-[85%] self-center" on:click=add_number_data>"+ Number"</button>
+                    <button class="mb-6 bg-blue-500 hover:bg-blue-700 py-2 px-1 text-white rounded w-[12rem] max-w-[85%] self-center" on:click=add_point_data>"+ Point"</button>
+                </div>
+                <div class="flex flex-col items-center overflow-scroll">
+                    <For
+                        each=datas
+                        key=|data| data.id
+                        view=move |data: Data| {
+                            view! { cx,
+                                <DataView data />
+                            }
+                        }
+                    />
+                </div>
+
                 <h3 class="text-3xl text-center m-3">"Steps"</h3>
                 <div class="flex flex-col items-center overflow-scroll">
                     <For
@@ -460,17 +761,18 @@ pub fn DrawlingC(cx: Scope) -> impl IntoView {
                         key=|step| step.id
                         view=move |step: Step| {
                             view! { cx,
-                                <StepC set_steps step/>
+                                <StepView step />
                             }
                         }
                     />
                 </div>
-                <div class="grow"/>
-                <button class=classes on:click=add_draw_point_step>"Draw Point"</button>
-                <button class=classes on:click=add_draw_line_step>"Draw Line"</button>
+                <div class="flex flex-col justify-self-end self-center">
+                    <button class= "mb-6 bg-blue-500 hover:bg-blue-700 py-2 px-1 text-white rounded w-[12rem] max-w-[85%] self-center" on:click=add_draw_point_step>"Draw Point"</button>
+                    <button class="mb-6 bg-blue-500 hover:bg-blue-700 py-2 px-1 text-white rounded w-[12rem] max-w-[85%] self-center" on:click=add_draw_line_step>"Draw Line"</button>
+                </div>
             </div>
 
-            <DrawlingCanvasC drawables/>
+            <DrawlingCanvasView steps />
         </div>
     }
 }
