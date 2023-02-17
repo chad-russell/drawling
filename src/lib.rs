@@ -111,34 +111,32 @@ pub fn options_for(cx: Scope, id: usize) -> Vec<StepOption> {
 pub fn PointC(cx: Scope, point: RwSignal<PointData>, step_id: usize) -> impl IntoView {
     move || match point.get() {
         PointData::Xy(xy) => {
-            let (x, set_x) = xy.x.split();
-            let (y, set_y) = xy.y.split();
             view!{ cx, 
                 <div class="flex flex-row">
                     <p class="mr-1">"x:"</p>
-                    <DraggableNumC d=x set_d=set_x/>
+                    <DraggableNumC d=xy.x/>
                 </div>
                 <div class="flex flex-row">
                     <p class="mr-1">"y:"</p>
-                    <DraggableNumC d=y set_d=set_y/>
+                    <DraggableNumC d=xy.y/>
                 </div>
                 <button on:click=move |_| point.set(PointData::Ref(create_rw_signal(cx, None)))>"Switch it!"</button>
             }.into_view(cx)
         },
         PointData::Ref(r) => view! { cx,
             <p>"Ref"</p>
-            <select on:change=move |e| { 
-                r.set(Some(serde_json::from_str::<StepOption>(&event_target_value(&e)).unwrap())) 
-            }>
-                <For 
-                    each=move || options_for(cx, step_id) 
-                    key=|o| o.drawable_id
-                    view=move |o| {
-                        let o_name = o.name.clone();
-                        view!{cx, <option value={o}>{o_name}</option> }
-                    }
-                />
-            </select>
+            // <select on:change=move |e| { 
+            //     r.set(Some(serde_json::from_str::<StepOption>(&event_target_value(&e)).unwrap())) 
+            // }>
+            //     <For 
+            //         each=move || options_for(cx, step_id) 
+            //         key=|o| o.drawable_id
+            //         view=move |o| {
+            //             let o_name = o.name.clone();
+            //             view!{cx, <option value={o}>{o_name}</option> }
+            //         }
+            //     />
+            // </select>
             <button on:click=move |_| point.set(PointData::Xy(PointXYData { x: create_rw_signal(cx, 0.0), y: create_rw_signal(cx, 0.0) }))>"Switch it!"</button>
         }.into_view(cx)
     }
@@ -342,7 +340,9 @@ fn execute(steps: ReadSignal<Vec<Step>>) -> Vec<Drawable> {
 }
 
 #[component]
-pub fn DraggableNumC(cx: Scope, d: ReadSignal<f64>, set_d: WriteSignal<f64>) -> impl IntoView {
+pub fn DraggableNumC(cx: Scope, d: RwSignal<f64>) -> impl IntoView {
+    let (d, set_d) = d.split();
+
     let set_drag_data = use_context::<WriteSignal<DragData>>(cx).unwrap();
 
     let mousedown_callback = move |e: web_sys::MouseEvent| { 
@@ -381,7 +381,8 @@ pub fn DrawlingC(cx: Scope) -> impl IntoView {
     let (drag_data, set_drag_data) = create_signal(cx, DragData::default());
     provide_context(cx, set_drag_data);
 
-    let (id, set_id) = create_signal(cx, 1);
+    // let (id, set_id) = create_signal(cx, 1);
+    let mut id = 1;
 
     let (steps, set_steps) = create_signal::<Vec<Step>>(cx, vec![
                                                         Step {
@@ -400,7 +401,7 @@ pub fn DrawlingC(cx: Scope) -> impl IntoView {
     provide_context(cx, drawables);
 
     let add_draw_point_step = move |_| { 
-        let new_step = Step { id: id(), step: StepData::DrawPoint(create_rw_signal(cx, 
+        let new_step = Step { id: id, step: StepData::DrawPoint(create_rw_signal(cx, 
                                                                                    PointData::Xy(
                                                                                        PointXYData { 
                                                                                            x: create_rw_signal(cx, 0.0), 
@@ -410,7 +411,7 @@ pub fn DrawlingC(cx: Scope) -> impl IntoView {
 
         set_steps.update(|s| {
             s.push(new_step);
-            set_id.set(id() + 1);
+            id += 1;
         });
     };
 
@@ -429,11 +430,11 @@ pub fn DrawlingC(cx: Scope) -> impl IntoView {
                                              y: create_rw_signal(cx, 0.0) 
                                          }));
 
-        let new_step = Step { id: id(), step: StepData::DrawLine(start, end) };
+        let new_step = Step { id: id, step: StepData::DrawLine(start, end) };
 
         set_steps.update(|s| {
             s.push(new_step);
-            set_id.set(id() + 1);
+            id += 1;
         });
     };
 
