@@ -1,32 +1,21 @@
 use leptos::*;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ResolvableToNumber {
-    Number(RwSignal<f64>),
-}
-
-trait ResolveToNumber {
-    fn resolve(&self, cx: Scope) -> f64;
-}
-
-impl ResolveToNumber for ResolvableToNumber {
-    fn resolve(&self, _cx: Scope) -> f64 {
-        match self {
-            ResolvableToNumber::Number(n) => n.get(),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PointSignal {
-    pub x: RwSignal<ResolvableToNumber>,
-    pub y: RwSignal<ResolvableToNumber>,
+    pub x: RwSignal<ResolvableTo<NumberSignal>>,
+    pub y: RwSignal<ResolvableTo<NumberSignal>>,
 }
+
+pub type NumberSignal = RwSignal<f64>;
 
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct Point {
     pub x: f64,
     pub y: f64,
+}
+
+trait ResolveToNumber {
+    fn resolve(&self, cx: Scope) -> f64;
 }
 
 trait ResolveToPoint {
@@ -49,7 +38,16 @@ impl ResolveToPoint for ResolvableTo<PointSignal> {
                 x: point.x.get().resolve(cx),
                 y: point.y.get().resolve(cx),
             },
-            ResolvableTo::Ref(snap_point) => snap_point.resolve(cx),
+            ResolvableTo::Ref(r) => ResolveToPoint::resolve(r, cx),
+        }
+    }
+}
+
+impl ResolveToNumber for ResolvableTo<NumberSignal> {
+    fn resolve(&self, cx: Scope) -> f64 {
+        match self {
+            ResolvableTo::T(n) => n.get(),
+            ResolvableTo::Ref(r) => ResolveToNumber::resolve(r, cx),
         }
     }
 }
@@ -86,6 +84,50 @@ impl DataRef {
             })
             .collect::<Vec<String>>()
             .join("")
+    }
+}
+
+impl ResolveToNumber for DataRef {
+    fn resolve(&self, cx: Scope) -> f64 {
+        match self.0[0] {
+            DataRefPathEl::Step => {
+                let step_id = match self.0[1] {
+                    DataRefPathEl::WithId(i) => i,
+                    _ => todo!(),
+                };
+                let step = use_context::<RwSignal<Vec<Step>>>(cx)
+                    .unwrap()
+                    .with(|steps| {
+                        steps
+                            .iter()
+                            .find(|d| d.id == step_id)
+                            .cloned()
+                            .expect("Invalid step id")
+                    });
+                match step.data {
+                    StepData::DrawPoint(point) => match self.0[2] {
+                        DataRefPathEl::PropName("x") => point.get().resolve(cx).x,
+                        DataRefPathEl::PropName("y") => point.get().resolve(cx).y,
+                        _ => todo!(),
+                    },
+                    StepData::DrawLine { start, end } => match self.0[2] {
+                        DataRefPathEl::PropName("start") => match self.0[3] {
+                            DataRefPathEl::PropName("x") => start.get().resolve(cx).x,
+                            DataRefPathEl::PropName("y") => start.get().resolve(cx).y,
+                            _ => todo!(),
+                        },
+                        DataRefPathEl::PropName("end") => match self.0[3] {
+                            DataRefPathEl::PropName("x") => end.get().resolve(cx).x,
+                            DataRefPathEl::PropName("y") => end.get().resolve(cx).y,
+                            _ => todo!(),
+                        },
+                        _ => todo!(),
+                    },
+                }
+            }
+            DataRefPathEl::Data => todo!(),
+            _ => todo!(),
+        }
     }
 }
 
@@ -250,14 +292,70 @@ pub fn DraggableNumView(cx: Scope, d: RwSignal<f64>) -> impl IntoView {
 }
 
 #[derive(PartialEq, Copy, Clone, Debug)]
-pub struct InferTarget(RwSignal<ResolvableTo<PointSignal>>);
+pub enum InferTarget {
+    Number(RwSignal<ResolvableTo<NumberSignal>>),
+    Point(RwSignal<ResolvableTo<PointSignal>>),
+}
 
 #[component]
-fn ResolvableToNumberView(cx: Scope, n: RwSignal<ResolvableToNumber>) -> impl IntoView {
-    match n.get() {
-        ResolvableToNumber::Number(n) => view! { cx,
-            <DraggableNumView d=n />
-        },
+fn ResolvableToNumberView(
+    cx: Scope,
+    n: RwSignal<ResolvableTo<NumberSignal>>,
+    data_ref_path: StoredValue<Vec<DataRefPathEl>>,
+) -> impl IntoView {
+    move || {
+        let context_infer_target = use_context::<RwSignal<Option<InferTarget>>>(cx).unwrap();
+
+        if let Some(InferTarget::Number(it)) = context_infer_target.get() {
+            if n == it {
+                return view! { cx,
+                    <div class="flex flex-row">
+                        <p>"..."</p>
+                        <button class="border-2 border-gray-800 mt-4" on:click=move |_| {
+                            context_infer_target.set(None);
+                        }>
+                            "C"
+                        </button>
+                    </div>
+                }
+                .into_view(cx);
+            } else {
+                return view! { cx,
+                    <div class="flex flex-row">
+                        <button class="border-2 border-gray-800 mt-4" on:click=move |_| {
+                            it.set(ResolvableTo::Ref(DataRef(data_ref_path.get())));
+                            context_infer_target.set(None);
+                        }>
+                            "O"
+                        </button>
+                    </div>
+                }
+                .into_view(cx);
+            }
+        }
+
+        match n.get() {
+            ResolvableTo::T(t) => view! { cx,
+                <div class="flex flex-row">
+                    <DraggableNumView d=t />
+                    <button class="border-2 border-gray-800" on:click=move |_| {
+                        context_infer_target.set(Some(InferTarget::Number(n)));
+                    }>"I"</button>
+                </div>
+            }
+            .into_view(cx),
+            ResolvableTo::Ref(r) => view! { cx,
+                <div class="flex flex-col">
+                    <p>{r.desc()}</p>
+                    // <button class="border-2 border-gray-800 mt-4" on:click=move |_| {
+                    //     n.set(ResolvableTo::T(create_signal(cx, 0.0)));
+                    // }>
+                    //     "Cancel Infer"
+                    // </button>
+                </div>
+            }
+            .into_view(cx),
+        }
     }
 }
 
@@ -266,11 +364,12 @@ fn InnerStepViewDrawPoint(
     cx: Scope,
     sig: RwSignal<ResolvableTo<PointSignal>>,
     point: PointSignal,
+    data_ref_path: StoredValue<Vec<DataRefPathEl>>,
 ) -> impl IntoView {
     move || {
         let context_infer_target = use_context::<RwSignal<Option<InferTarget>>>(cx).unwrap();
-        if let Some(it) = context_infer_target.get() {
-            if sig == it.0 {
+        if let Some(InferTarget::Point(it)) = context_infer_target.get() {
+            if sig == it {
                 return view! { cx,
                     <div class="flex flex-col">
                         <p>"..."</p>
@@ -285,17 +384,25 @@ fn InnerStepViewDrawPoint(
             }
         }
 
+        let mut x_path = data_ref_path.get();
+        x_path.push(DataRefPathEl::PropName("x"));
+        let x_path = store_value(cx, x_path);
+
+        let mut y_path = data_ref_path.get();
+        y_path.push(DataRefPathEl::PropName("y"));
+        let y_path = store_value(cx, y_path);
+
         view! { cx,
             <div class="flex flex-col">
                 <p>"Draw Point"</p>
                 <div class="flex flex-row">
                     <p>"x: "</p>
-                    <ResolvableToNumberView n={point.x} />
+                    <ResolvableToNumberView n={point.x} data_ref_path=x_path />
                     <p class="ml-3">"y: "</p>
-                    <ResolvableToNumberView n={point.y} />
+                    <ResolvableToNumberView n={point.y} data_ref_path=y_path />
                 </div>
                 <button class="border-2 border-gray-800 mt-4" on:click=move |_| {
-                    context_infer_target.set(Some(InferTarget(sig)));
+                    context_infer_target.set(Some(InferTarget::Point(sig)));
                 }>
                     "Infer"
                 </button>
@@ -309,10 +416,11 @@ fn InnerStepViewDrawPoint(
 fn InnerStepViewResolveableToPoint(
     cx: Scope,
     point: RwSignal<ResolvableTo<PointSignal>>,
+    data_ref_path: StoredValue<Vec<DataRefPathEl>>,
 ) -> impl IntoView {
     move || match point() {
         ResolvableTo::T(p) => view! { cx,
-            <InnerStepViewDrawPoint sig=point point=p />
+            <InnerStepViewDrawPoint sig=point point=p data_ref_path=data_ref_path />
         }
         .into_view(cx),
         ResolvableTo::Ref(dr) => {
@@ -320,7 +428,7 @@ fn InnerStepViewResolveableToPoint(
             view! { cx,
                 <div>{dr.desc()}</div>
                 <button class="border-2 border-gray-800 mt-4" on:click=move |_| {
-                    context_infer_target.set(Some(InferTarget(point)));
+                    context_infer_target.set(Some(InferTarget::Point(point)));
                 }>
                     "Infer"
                 </button>
@@ -335,40 +443,56 @@ fn InnerStepViewDrawLine(
     cx: Scope,
     start: RwSignal<ResolvableTo<PointSignal>>,
     end: RwSignal<ResolvableTo<PointSignal>>,
+    data_ref_path: StoredValue<Vec<DataRefPathEl>>,
 ) -> impl IntoView {
+    let mut start_path = data_ref_path.get();
+    start_path.push(DataRefPathEl::PropName("start"));
+    let start_path = store_value(cx, start_path);
+
+    let mut end_path = data_ref_path.get();
+    end_path.push(DataRefPathEl::PropName("start"));
+    let end_path = store_value(cx, end_path);
+
     view! { cx,
         <div class="flex flex-col">
             <p>"Draw Line"</p>
 
             <p>"start: "</p>
-            <InnerStepViewResolveableToPoint point={start} />
+            <InnerStepViewResolveableToPoint point={start} data_ref_path=start_path />
 
             <p>"end: "</p>
-            <InnerStepViewResolveableToPoint point={end} />
+            <InnerStepViewResolveableToPoint point={end} data_ref_path=end_path />
         </div>
     }
 }
 
 #[component]
 pub fn InnerStepView(cx: Scope, step: Step) -> impl IntoView {
-    move || match step.data {
-        StepData::DrawPoint(point) => match point.get() {
-            ResolvableTo::T(p) => view! { cx,
-                <InnerStepViewDrawPoint sig=point point=p />
-            }
-            .into_view(cx),
-            ResolvableTo::Ref(dr) => {
-                view! { cx,
-                    <div>"TODO"</div>
-                <div>{dr.desc()}</div>
+    move || {
+        let data_ref_path = store_value(
+            cx,
+            vec![DataRefPathEl::Step, DataRefPathEl::WithId(step.id)],
+        );
+
+        match step.data {
+            StepData::DrawPoint(point) => match point.get() {
+                ResolvableTo::T(p) => view! { cx,
+                    <InnerStepViewDrawPoint sig=point point=p data_ref_path />
                 }
+                .into_view(cx),
+                ResolvableTo::Ref(dr) => {
+                    view! { cx,
+                        <div>"TODO"</div>
+                    <div>{dr.desc()}</div>
+                    }
+                }
+                .into_view(cx),
+            },
+            StepData::DrawLine { start, end } => view! { cx,
+                <InnerStepViewDrawLine start end data_ref_path />
             }
             .into_view(cx),
-        },
-        StepData::DrawLine { start, end } => view! { cx,
-            <InnerStepViewDrawLine start end />
         }
-        .into_view(cx),
     }
 }
 
@@ -394,14 +518,28 @@ pub fn StepView(cx: Scope, step: Step) -> impl IntoView {
 }
 
 #[component]
-pub fn InnerDataViewPoint(cx: Scope, point: PointSignal) -> impl IntoView {
-    view! { cx,
-        <div class="flex flex-row">
-            <p>"x: "</p>
-            <ResolvableToNumberView n={point.x} />
-            <p class="ml-3">"y: "</p>
-            <ResolvableToNumberView n={point.y} />
-        </div>
+pub fn InnerDataViewPoint(
+    cx: Scope,
+    point: PointSignal,
+    data_ref_path: StoredValue<Vec<DataRefPathEl>>,
+) -> impl IntoView {
+    let mut x_path = data_ref_path.get();
+    x_path.push(DataRefPathEl::PropName("x"));
+    let x_path = store_value(cx, x_path);
+
+    let mut y_path = data_ref_path.get();
+    y_path.push(DataRefPathEl::PropName("y"));
+    let y_path = store_value(cx, y_path);
+
+    move || {
+        view! { cx,
+            <div class="flex flex-row">
+                <p>"x: "</p>
+                <ResolvableToNumberView n={point.x} data_ref_path=x_path />
+                <p class="ml-3">"y: "</p>
+                <ResolvableToNumberView n={point.y} data_ref_path=y_path />
+            </div>
+        }
     }
 }
 
@@ -418,7 +556,10 @@ pub fn InnerDataView(cx: Scope, data: Data) -> impl IntoView {
         DataData::Point(p) => view! { cx,
             <div>
                 <p>"Point"</p>
-                <InnerDataViewPoint point={p.get()} />
+                <InnerDataViewPoint point={p.get()} data_ref_path={store_value(cx, vec![
+                    DataRefPathEl::Data,
+                    DataRefPathEl::WithId(data.id),
+                ])} />
             </div>
         }
         .into_view(cx),
@@ -465,7 +606,6 @@ pub fn DrawlingCanvasView(cx: Scope, steps: RwSignal<Vec<Step>>) -> impl IntoVie
         .unwrap();
 
     let current_aspect_ratio = canvas.width() as f64 / canvas.height() as f64;
-    // let desired_aspect_ratio = 8.0f64 / 5.0f64;
     let desired_aspect_ratio = current_aspect_ratio;
     let width_scale_factor = (desired_aspect_ratio / current_aspect_ratio).sqrt();
     let height_scale_factor = 1.0 / width_scale_factor;
@@ -483,14 +623,8 @@ pub fn DrawlingCanvasView(cx: Scope, steps: RwSignal<Vec<Step>>) -> impl IntoVie
     let hover_infer_target = create_rw_signal(
         cx,
         Some(ResolvableTo::T(PointSignal {
-            x: create_rw_signal(
-                cx,
-                ResolvableToNumber::Number(create_rw_signal(cx, mouse_pos().x)),
-            ),
-            y: create_rw_signal(
-                cx,
-                ResolvableToNumber::Number(create_rw_signal(cx, mouse_pos().y)),
-            ),
+            x: create_rw_signal(cx, ResolvableTo::T(create_rw_signal(cx, mouse_pos().x))),
+            y: create_rw_signal(cx, ResolvableTo::T(create_rw_signal(cx, mouse_pos().y))),
         })),
     );
 
@@ -513,10 +647,10 @@ pub fn DrawlingCanvasView(cx: Scope, steps: RwSignal<Vec<Step>>) -> impl IntoVie
     let mousedown_callback = move |_e: web_sys::MouseEvent| {
         let context_infer_target = use_context::<RwSignal<Option<InferTarget>>>(cx).unwrap();
 
-        if let (Some(it), Some(hover_infer_target)) =
+        if let (Some(InferTarget::Point(it)), Some(hover_infer_target)) =
             (context_infer_target.get(), hover_infer_target.get())
         {
-            it.0.set(hover_infer_target);
+            it.set(hover_infer_target);
             context_infer_target.set(None);
         }
     };
@@ -572,7 +706,7 @@ pub fn DrawlingCanvasView(cx: Scope, steps: RwSignal<Vec<Step>>) -> impl IntoVie
             for sp in snap_points.iter() {
                 context.set_stroke_style(&wasm_bindgen::JsValue::from_str("red"));
 
-                let sp = sp.resolve(cx);
+                let sp = ResolveToPoint::resolve(sp, cx);
 
                 context.begin_path();
                 context
@@ -587,11 +721,11 @@ pub fn DrawlingCanvasView(cx: Scope, steps: RwSignal<Vec<Step>>) -> impl IntoVie
             hover_infer_target.set(Some(ResolvableTo::T(PointSignal {
                 x: create_rw_signal(
                     cx,
-                    ResolvableToNumber::Number(create_rw_signal(cx, mouse_pos().x)),
+                    ResolvableTo::T(create_rw_signal(cx, mouse_pos().x.round())),
                 ),
                 y: create_rw_signal(
                     cx,
-                    ResolvableToNumber::Number(create_rw_signal(cx, mouse_pos().y)),
+                    ResolvableTo::T(create_rw_signal(cx, mouse_pos().y.round())),
                 ),
             })));
 
@@ -600,7 +734,7 @@ pub fn DrawlingCanvasView(cx: Scope, steps: RwSignal<Vec<Step>>) -> impl IntoVie
             // We should only run this effect when the mouse movement causes a change to the currently selected snap point.
             snap_points.with(|snap_points| {
                 for sp in snap_points.iter() {
-                    let spr = sp.resolve(cx);
+                    let spr = ResolveToPoint::resolve(sp, cx);
                     let dist =
                         ((spr.x - mouse_pos().x).powi(2) + (spr.y - mouse_pos().y).powi(2)).sqrt();
                     if dist < 5.0 {
@@ -657,27 +791,15 @@ pub fn DrawlingView(cx: Scope) -> impl IntoView {
                     start: create_rw_signal(
                         cx,
                         ResolvableTo::T(PointSignal {
-                            x: create_rw_signal(
-                                cx,
-                                ResolvableToNumber::Number(create_rw_signal(cx, 0.0)),
-                            ),
-                            y: create_rw_signal(
-                                cx,
-                                ResolvableToNumber::Number(create_rw_signal(cx, 0.0)),
-                            ),
+                            x: create_rw_signal(cx, ResolvableTo::T(create_rw_signal(cx, 0.0))),
+                            y: create_rw_signal(cx, ResolvableTo::T(create_rw_signal(cx, 0.0))),
                         }),
                     ),
                     end: create_rw_signal(
                         cx,
                         ResolvableTo::T(PointSignal {
-                            x: create_rw_signal(
-                                cx,
-                                ResolvableToNumber::Number(create_rw_signal(cx, 0.0)),
-                            ),
-                            y: create_rw_signal(
-                                cx,
-                                ResolvableToNumber::Number(create_rw_signal(cx, 0.0)),
-                            ),
+                            x: create_rw_signal(cx, ResolvableTo::T(create_rw_signal(cx, 0.0))),
+                            y: create_rw_signal(cx, ResolvableTo::T(create_rw_signal(cx, 0.0))),
                         }),
                     ),
                 },
@@ -691,14 +813,8 @@ pub fn DrawlingView(cx: Scope) -> impl IntoView {
                 data: StepData::DrawPoint(create_rw_signal(
                     cx,
                     ResolvableTo::T(PointSignal {
-                        x: create_rw_signal(
-                            cx,
-                            ResolvableToNumber::Number(create_rw_signal(cx, 0.0)),
-                        ),
-                        y: create_rw_signal(
-                            cx,
-                            ResolvableToNumber::Number(create_rw_signal(cx, 0.0)),
-                        ),
+                        x: create_rw_signal(cx, ResolvableTo::T(create_rw_signal(cx, 0.0))),
+                        y: create_rw_signal(cx, ResolvableTo::T(create_rw_signal(cx, 0.0))),
                     }),
                 )),
             })
@@ -720,14 +836,8 @@ pub fn DrawlingView(cx: Scope) -> impl IntoView {
                 data: DataData::Point(create_rw_signal(
                     cx,
                     PointSignal {
-                        x: create_rw_signal(
-                            cx,
-                            ResolvableToNumber::Number(create_rw_signal(cx, 0.0)),
-                        ),
-                        y: create_rw_signal(
-                            cx,
-                            ResolvableToNumber::Number(create_rw_signal(cx, 0.0)),
-                        ),
+                        x: create_rw_signal(cx, ResolvableTo::T(create_rw_signal(cx, 0.0))),
+                        y: create_rw_signal(cx, ResolvableTo::T(create_rw_signal(cx, 0.0))),
                     },
                 )),
             })
